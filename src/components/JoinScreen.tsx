@@ -18,7 +18,7 @@ export default function JoinScreen() {
   const handleJoin = (e: React.FormEvent) => {
     e.preventDefault();
     setLocalError("");
-    
+
     if (inviteCode !== "dagong") {
       setLocalError(t("The secret passphrase is incorrect."));
       return;
@@ -30,7 +30,11 @@ export default function JoinScreen() {
   };
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.log('Sign out from Supabase failed (offline mode), proceeding with local logout');
+    }
     logout();
   };
 
@@ -43,7 +47,7 @@ export default function JoinScreen() {
       <div className="absolute bottom-0 right-0 w-[600px] h-[600px] bg-yellow-900/10 rounded-full blur-[100px] opacity-30 pointer-events-none" />
 
       <div className="w-full max-w-md relative z-10">
-        
+
         {/* User Profile Card */}
         {profile && (
           <div className="mb-6 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-2xl p-4 flex items-center justify-between shadow-lg">
@@ -59,7 +63,7 @@ export default function JoinScreen() {
                 </div>
               </div>
             </div>
-            <button 
+            <button
               onClick={handleLogout}
               className="p-2 text-zinc-500 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-colors"
               title="Sign Out"
@@ -70,7 +74,7 @@ export default function JoinScreen() {
         )}
 
         <div className="bg-zinc-950/60 backdrop-blur-2xl border border-amber-900/30 rounded-3xl p-8 shadow-[0_0_40px_rgba(0,0,0,0.5)]">
-          
+
           <div className="text-center mb-10">
             <h1 className="text-5xl font-serif font-bold mb-3 tracking-tight text-transparent bg-clip-text bg-gradient-to-b from-amber-100 to-amber-500 drop-shadow-sm">
               Avalon
@@ -87,7 +91,7 @@ export default function JoinScreen() {
           )}
 
           <form onSubmit={handleJoin} className="space-y-6">
-            
+
             {/* Secret Passphrase Section */}
             <div className="relative pt-4 pb-2">
               <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-[#0a0a0a] border border-amber-900/30 rounded-full p-2 text-amber-500 shadow-lg z-10">
@@ -129,7 +133,7 @@ export default function JoinScreen() {
                   />
                 </div>
               </div>
-              
+
               <div>
                 <label className="block text-[10px] font-medium text-amber-500/50 uppercase tracking-widest mb-2 ml-1">
                   {t("Your Identity")}
@@ -163,7 +167,7 @@ export default function JoinScreen() {
             </button>
           </form>
         </div>
-        
+
         <p className="text-center text-zinc-600 text-xs mt-8 font-serif italic">
           "The truth is hidden in the mist."
         </p>
