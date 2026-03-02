@@ -77,8 +77,16 @@ export default function AuthScreen() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-6 text-zinc-50">
-      <div className="w-full max-w-sm space-y-8">
+    <div className="min-h-screen flex flex-col items-center justify-center p-6 text-zinc-50 relative overflow-hidden">
+      {/* Epic Background Image */}
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: 'url(/avalon-bg.png)' }}
+      />
+      {/* Dark overlay for readability */}
+      <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/70 via-zinc-950/80 to-zinc-950/95" />
+
+      <div className="w-full max-w-sm space-y-8 relative z-10">
         <div className="text-center">
           <button
             type="button"
