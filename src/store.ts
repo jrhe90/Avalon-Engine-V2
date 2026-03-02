@@ -89,6 +89,9 @@ interface GameState {
   error: string | null;
   language: 'en' | 'zh';
   devRequestedRole?: Role;
+  idleWarning: boolean;
+  idleCountdown: number;
+  _idleTimer?: ReturnType<typeof setInterval>;
   setLanguage: (lang: 'en' | 'zh') => void;
   setDevRequestedRole: (role?: Role) => void;
   connect: (roomId: string, name: string) => void;
@@ -105,6 +108,7 @@ interface GameState {
   voteQuest: (success: boolean) => void;
   assassinate: (targetSessionId: string) => void;
   continueVoteReveal: () => void;
+  pingActivity: () => void;
 }
 
 const generateSessionId = () => {
@@ -126,6 +130,8 @@ export const useGameStore = create<GameState>()(
       error: null,
       language: 'en',
       devRequestedRole: undefined,
+      idleWarning: false,
+      idleCountdown: 0,
 
       setLanguage: (lang) => set({ language: lang }),
       setDevRequestedRole: (role) => set({ devRequestedRole: role }),
@@ -167,9 +173,32 @@ export const useGameStore = create<GameState>()(
           get().leaveRoom();
         });
 
-        socket.on("game_ended", () => {
-          set({ error: "The host has ended the game." });
+        socket.on("game_ended", (data?: { reason?: string }) => {
+          const timer = get()._idleTimer;
+          if (timer) clearInterval(timer);
+          set({ error: data?.reason === 'idle_timeout' ? 'Room closed due to inactivity.' : 'The host has ended the game.', idleWarning: false, idleCountdown: 0, _idleTimer: undefined });
           get().leaveRoom();
+        });
+
+        socket.on("room_idle_warning", ({ countdown }: { countdown: number }) => {
+          // Start local countdown
+          set({ idleWarning: true, idleCountdown: countdown });
+          const timer = setInterval(() => {
+            const current = get().idleCountdown;
+            if (current <= 1) {
+              clearInterval(timer);
+              set({ idleCountdown: 0, _idleTimer: undefined });
+            } else {
+              set({ idleCountdown: current - 1 });
+            }
+          }, 1000);
+          set({ _idleTimer: timer });
+        });
+
+        socket.on("room_idle_cancelled", () => {
+          const timer = get()._idleTimer;
+          if (timer) clearInterval(timer);
+          set({ idleWarning: false, idleCountdown: 0, _idleTimer: undefined });
         });
 
         set({ socket, roomId, name });
@@ -242,6 +271,13 @@ export const useGameStore = create<GameState>()(
       restartGame: () => {
         const { socket, roomId } = get();
         socket?.emit("restart_game", { roomId });
+      },
+
+      pingActivity: () => {
+        const { socket, roomId, _idleTimer } = get();
+        socket?.emit("room_activity_ping", { roomId });
+        if (_idleTimer) clearInterval(_idleTimer);
+        set({ idleWarning: false, idleCountdown: 0, _idleTimer: undefined });
       },
     }),
     {

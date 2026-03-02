@@ -141,6 +141,16 @@ interface Room {
     voteHistory: TeamVoteHistory[];
     botMemories: Record<string, BotMemory>; // bot sessionId -> memory
   };
+  lastActivityTime: number;
+  idleWarningEmitted: boolean;
+}
+
+const IDLE_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
+const IDLE_WARNING_COUNTDOWN_S = 30; // 30 seconds after warning
+
+function touchRoom(room: Room) {
+  room.lastActivityTime = Date.now();
+  room.idleWarningEmitted = false;
 }
 
 const rooms: Record<string, Room> = {};
@@ -620,6 +630,27 @@ function handleBotActions(room: Room, io: Server) {
 }
 
 function setupSocket(io: Server) {
+  // Periodic idle room checker (runs every 60 seconds)
+  setInterval(() => {
+    const now = Date.now();
+    for (const roomId in rooms) {
+      const room = rooms[roomId];
+      const elapsed = now - room.lastActivityTime;
+
+      if (elapsed >= IDLE_TIMEOUT_MS + IDLE_WARNING_COUNTDOWN_S * 1000) {
+        // Time's up — auto-close
+        console.log(`Room ${roomId} auto-closed due to inactivity.`);
+        io.to(roomId).emit('game_ended', { reason: 'idle_timeout' });
+        delete rooms[roomId];
+      } else if (elapsed >= IDLE_TIMEOUT_MS && !room.idleWarningEmitted) {
+        // Emit warning
+        room.idleWarningEmitted = true;
+        io.to(roomId).emit('room_idle_warning', { countdown: IDLE_WARNING_COUNTDOWN_S });
+        console.log(`Room ${roomId}: idle warning emitted.`);
+      }
+    }
+  }, 10_000); // Check every 10 seconds for responsiveness
+
   io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
 
@@ -661,7 +692,9 @@ function setupSocket(io: Server) {
               assassinationTarget: null,
               voteHistory: [],
               botMemories: {}
-            }
+            },
+            lastActivityTime: Date.now(),
+            idleWarningEmitted: false
           };
         }
 
@@ -688,6 +721,7 @@ function setupSocket(io: Server) {
           });
         }
 
+        touchRoom(room);
         broadcastRoom(room, io);
       } catch (err) {
         console.error('Error in join_room:', err);
@@ -700,6 +734,7 @@ function setupSocket(io: Server) {
         const room = rooms[roomId];
         if (room && room.status === 'lobby') {
           room.settings = settings;
+          touchRoom(room);
           broadcastRoom(room, io);
         }
       } catch (err) {
@@ -720,6 +755,7 @@ function setupSocket(io: Server) {
             isConnected: true,
             isBot: true
           });
+          touchRoom(room);
           broadcastRoom(room, io);
         }
       } catch (err) {
@@ -731,6 +767,7 @@ function setupSocket(io: Server) {
       try {
         const room = rooms[roomId];
         if (room && room.status === 'lobby' && room.players.length >= 5 && room.players.length <= 10) {
+          touchRoom(room);
           assignRoles(room.players, room.settings.optionalRoles, requestedRoles);
 
           const config = getQuestConfig(room.players.length);
@@ -758,6 +795,7 @@ function setupSocket(io: Server) {
       try {
         const room = rooms[roomId];
         if (room && room.status === 'role_reveal') {
+          touchRoom(room);
           room.status = 'team_building';
           broadcastRoom(room, io);
           handleBotActions(room, io);
@@ -771,6 +809,7 @@ function setupSocket(io: Server) {
       try {
         const room = rooms[roomId];
         if (room && room.status === 'team_building') {
+          touchRoom(room);
           room.gameState.proposedTeam = team;
           room.status = 'team_voting';
           room.gameState.teamVotes = {};
@@ -789,6 +828,7 @@ function setupSocket(io: Server) {
         if (!sessionId) return;
         const room = rooms[roomId];
         if (room && room.status === 'team_voting') {
+          touchRoom(room);
           room.gameState.teamVotes[sessionId] = approve;
           checkTeamVotes(room, io);
         }
@@ -801,6 +841,7 @@ function setupSocket(io: Server) {
       try {
         const room = rooms[roomId];
         if (room && room.status === 'team_vote_reveal') {
+          touchRoom(room);
           applyTeamVoteResult(room, io);
         }
       } catch (err) {
@@ -815,6 +856,7 @@ function setupSocket(io: Server) {
         if (!sessionId) return;
         const room = rooms[roomId];
         if (room && room.status === 'quest_voting') {
+          touchRoom(room);
           const quest = room.gameState.quests[room.gameState.currentQuestIndex];
           quest.votes[sessionId] = success;
           checkQuestVotes(room, io);
@@ -831,6 +873,7 @@ function setupSocket(io: Server) {
         if (!sessionId) return;
         const room = rooms[roomId];
         if (room && room.status === 'assassin') {
+          touchRoom(room);
           const sender = room.players.find(p => p.sessionId === sessionId);
           const assassin = room.players.find(p => p.role === 'Assassin');
           const isEvil = sender && ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(sender.role as string);
@@ -946,6 +989,19 @@ function setupSocket(io: Server) {
         }
       } catch (err) {
         console.error('Error in restart_game:', err);
+      }
+    });
+
+    socket.on('room_activity_ping', ({ roomId }) => {
+      try {
+        const room = rooms[roomId];
+        if (room) {
+          touchRoom(room);
+          // Notify all clients that idle warning is cancelled
+          io.to(roomId).emit('room_idle_cancelled');
+        }
+      } catch (err) {
+        console.error('Error in room_activity_ping:', err);
       }
     });
 

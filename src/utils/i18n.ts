@@ -87,6 +87,13 @@ export const translations = {
     'Merlin was assassinated!': 'Merlin was assassinated!',
     'Merlin survived!': 'Merlin survived!',
     'Play Again': 'Play Again',
+
+    // Idle Warning
+    'Room Inactive': 'Room Inactive',
+    'This room will close due to inactivity.': 'This room will close due to inactivity.',
+    "I'm still here": "I'm still here",
+    'Cancel': 'Cancel',
+    'Waiting for players...': 'Waiting for players...',
   },
   zh: {
     // Roles
@@ -174,12 +181,19 @@ export const translations = {
     'Merlin was assassinated!': '梅林被刺杀了！',
     'Merlin survived!': '梅林存活了下来！',
     'Play Again': '再玩一次',
+
+    // Idle Warning
+    'Room Inactive': '房间不活跃',
+    'This room will close due to inactivity.': '房间即将因不活跃而关闭。',
+    "I'm still here": '我还在',
+    'Cancel': '取消',
+    'Waiting for players...': '等待玩家加入...',
   }
 };
 
 export function useTranslation() {
   const language = useGameStore(state => state.language);
-  
+
   const t = (key: keyof typeof translations.en | string): string => {
     // If key exists in translation dictionary, return it. Otherwise return the key itself.
     const dict = translations[language] as Record<string, string>;

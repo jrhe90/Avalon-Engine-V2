@@ -13,6 +13,7 @@ import RoleRevealScreen from "./components/RoleRevealScreen";
 import GameScreen from "./components/GameScreen";
 import AssassinScreen from "./components/AssassinScreen";
 import GameOverScreen from "./components/GameOverScreen";
+import IdleWarningModal from "./components/IdleWarningModal";
 import { LanguageToggle } from "./components/LanguageToggle";
 import { Loader2 } from "lucide-react";
 
@@ -34,7 +35,7 @@ export default function App() {
             .select('*')
             .eq('id', session.user.id)
             .single();
-          
+
           if (profileError && profileError.code !== 'PGRST116') {
             console.error("Profile fetch error:", profileError);
           }
@@ -60,15 +61,15 @@ export default function App() {
             .select('*')
             .eq('id', session.user.id)
             .single();
-            
+
           // If profile doesn't exist, it might be a new user where the insert hasn't finished.
           // Wait a moment and retry.
           if (!profile) {
-             await new Promise(resolve => setTimeout(resolve, 1000));
-             const retry = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
-             profile = retry.data;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            const retry = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
+            profile = retry.data;
           }
-          
+
           setAuth(session.user, profile);
         } else {
           setAuth(null, null);
@@ -122,6 +123,7 @@ export default function App() {
     <>
       <LanguageToggle />
       {renderScreen()}
+      <IdleWarningModal />
     </>
   );
 }
