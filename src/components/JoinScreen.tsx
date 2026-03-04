@@ -54,10 +54,13 @@ export default function JoinScreen() {
   const winRate = profile?.total_games ? Math.round((profile.wins / profile.total_games) * 100) : 0;
 
   return (
-    <div className="min-h-screen bg-[#050505] text-zinc-50 flex items-center justify-center p-4 relative overflow-hidden">
-      {/* Atmospheric Background */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[600px] bg-amber-900/20 rounded-full blur-[120px] opacity-50 pointer-events-none" />
-      <div className="absolute bottom-0 right-0 w-[600px] h-[600px] bg-yellow-900/10 rounded-full blur-[100px] opacity-30 pointer-events-none" />
+    <div className="min-h-screen text-zinc-50 flex items-center justify-center p-4 relative overflow-hidden">
+      {/* Background Image */}
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: 'url(/join-bg.jpg)' }}
+      />
+      <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/80 via-zinc-950/85 to-zinc-950/95" />
 
       <div className="w-full max-w-md relative z-10">
 

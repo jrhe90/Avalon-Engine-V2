@@ -55,6 +55,7 @@ export interface Room {
   | "game_over";
   settings: {
     optionalRoles: Role[];
+    botDifficulty?: 'normal' | 'hard';
   };
   gameState: {
     quests: Quest[];
@@ -104,8 +105,8 @@ interface GameState {
   setLanguage: (lang: 'en' | 'zh') => void;
   setDevRequestedRole: (role?: Role) => void;
   connect: (roomId: string, name: string) => void;
-  updateSettings: (settings: Room["settings"]) => void;
-  addBot: () => void;
+  updateSettings: (settings: Partial<Room["settings"]>) => void;
+  addBot: (difficulty?: 'normal' | 'hard') => void;
   startGame: (requestedRoles?: Record<string, Role>) => void;
   leaveRoom: () => void;
   kickPlayer: (targetSessionId: string) => void;
@@ -222,9 +223,12 @@ export const useGameStore = create<GameState>()(
         socket?.emit("update_settings", { roomId, settings });
       },
 
-      addBot: () => {
-        const { socket, roomId } = get();
-        socket?.emit("add_bot", { roomId });
+      addBot: (difficulty?: 'normal' | 'hard') => {
+        const { socket, room } = get();
+        if (!socket || !room) return;
+
+        const roomId = room.id;
+        socket?.emit("add_bot", { roomId, difficulty: difficulty || 'normal' });
       },
 
       startGame: (requestedRoles) => {

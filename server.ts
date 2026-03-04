@@ -128,9 +128,15 @@ interface TeamVoteHistory {
   approved: boolean;
 }
 
+type BotDifficulty = 'normal' | 'hard';
+
 interface BotMemory {
   trustScores: Record<string, number>; // sessionId -> score (0-100)
   knownRoles: Record<string, Role | 'Good' | 'Evil'>; // sessionId -> known role/alignment
+  merlinSuspicion: Record<string, number>; // sessionId -> score (0-100), used by evil
+  failAssociation: Record<string, number>; // sessionId -> number of failed quests they were on
+  votePatterns: Record<string, { approvedEvil: number; rejectedEvil: number; totalVotes: number }>;
+  percivalCandidates?: { a: string; b: string; merlinLikelihood: Record<string, number> };
 }
 
 interface Room {
@@ -139,6 +145,7 @@ interface Room {
   status: 'lobby' | 'role_reveal' | 'team_building' | 'team_voting' | 'team_vote_reveal' | 'quest_voting' | 'quest_result' | 'assassin' | 'game_over';
   settings: {
     optionalRoles: Role[];
+    botDifficulty: BotDifficulty;
   };
   gameState: {
     quests: Quest[];
@@ -233,25 +240,40 @@ function broadcastRoom(room: Room, io: Server) {
 }
 
 function initializeBotMemories(room: Room) {
+  const difficulty = room.settings.botDifficulty || 'normal';
+
   room.players.filter(p => p.isBot).forEach(bot => {
     const memory: BotMemory = {
       trustScores: {},
-      knownRoles: {}
+      knownRoles: {},
+      merlinSuspicion: {},
+      failAssociation: {},
+      votePatterns: {}
     };
 
+    const isBotEvil = ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(bot.role as string);
+    let merlinCandidateA: string | null = null;
+    let merlinCandidateB: string | null = null;
+
     room.players.forEach(p => {
+      memory.failAssociation[p.sessionId] = 0;
+      memory.votePatterns[p.sessionId] = { approvedEvil: 0, rejectedEvil: 0, totalVotes: 0 };
+
+      if (isBotEvil) {
+        memory.merlinSuspicion[p.sessionId] = 0;
+      }
+
       if (p.sessionId === bot.sessionId) {
         memory.trustScores[p.sessionId] = 100; // Trust self completely
         memory.knownRoles[p.sessionId] = bot.role as Role;
         return;
       }
 
-      // Default trust is 50
-      memory.trustScores[p.sessionId] = 50;
+      // Default trust is 50. In hard mode, good bots start a bit more neutral, evil bots distrust good more.
+      memory.trustScores[p.sessionId] = difficulty === 'hard' ? 40 : 50;
 
       const botRole = bot.role as Role;
       const targetRole = p.role as Role;
-      const isBotEvil = ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(botRole);
       const isTargetEvil = ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(targetRole);
 
       if (botRole === 'Merlin') {
@@ -260,13 +282,15 @@ function initializeBotMemories(room: Room) {
           memory.trustScores[p.sessionId] = 0;
           memory.knownRoles[p.sessionId] = 'Evil';
         } else {
-          memory.trustScores[p.sessionId] = 70; // Lean towards trusting others
+          memory.trustScores[p.sessionId] = difficulty === 'hard' ? 60 : 70; // Lean towards trusting others
         }
       } else if (botRole === 'Percival') {
         // Percival knows Merlin and Morgana but not which is which
         if (targetRole === 'Merlin' || targetRole === 'Morgana') {
-          memory.trustScores[p.sessionId] = 60; // Slightly higher trust, needs observation
-          // We don't set knownRoles because we don't know alignment yet
+          memory.trustScores[p.sessionId] = difficulty === 'hard' ? 50 : 60;
+
+          if (!merlinCandidateA) merlinCandidateA = p.sessionId;
+          else if (!merlinCandidateB) merlinCandidateB = p.sessionId;
         }
       } else if (isBotEvil && botRole !== 'Oberon') {
         // Evil knows other evil (except Oberon)
@@ -279,6 +303,17 @@ function initializeBotMemories(room: Room) {
         }
       }
     });
+
+    if (bot.role === 'Percival' && merlinCandidateA && merlinCandidateB) {
+      memory.percivalCandidates = {
+        a: merlinCandidateA,
+        b: merlinCandidateB,
+        merlinLikelihood: {
+          [merlinCandidateA]: 50,
+          [merlinCandidateB]: 50
+        }
+      };
+    }
 
     room.gameState.botMemories[bot.sessionId] = memory;
   });
@@ -297,6 +332,77 @@ function checkTeamVotes(room: Room, io: Server) {
       proposedTeam: [...room.gameState.proposedTeam],
       votes: { ...room.gameState.teamVotes },
       approved
+    });
+
+    // --- Improvement A: Vote History Analysis ---
+    // Good bots learn who approves/rejects teams with evil. Evil bots learn who acts like Merlin.
+    const difficulty = room.settings.botDifficulty || 'normal';
+    const trustDelta = difficulty === 'hard' ? 15 : 5;
+    const suspicionDelta = difficulty === 'hard' ? 15 : 5;
+
+    room.players.filter(p => p.isBot).forEach(bot => {
+      const memory = room.gameState.botMemories[bot.sessionId];
+      const isBotEvil = ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(bot.role as string);
+
+      const teamHadKnownEvil = room.gameState.proposedTeam.some(id => memory.knownRoles[id] === 'Evil' || (isBotEvil && id === bot.sessionId));
+
+      room.players.forEach(p => {
+        if (p.sessionId === bot.sessionId) return;
+
+        const votedApprove = room.gameState.teamVotes[p.sessionId];
+
+        // Update general vote patterns
+        if (teamHadKnownEvil) {
+          if (votedApprove) memory.votePatterns[p.sessionId].approvedEvil++;
+          else memory.votePatterns[p.sessionId].rejectedEvil++;
+        }
+        memory.votePatterns[p.sessionId].totalVotes++;
+
+        if (!isBotEvil) {
+          // Good Bot Logic: Adjust trust based on voting for evil-tainted teams
+          if (teamHadKnownEvil) {
+            if (votedApprove) {
+              memory.trustScores[p.sessionId] = Math.max(0, (memory.trustScores[p.sessionId] || 50) - trustDelta);
+            } else {
+              memory.trustScores[p.sessionId] = Math.min(100, (memory.trustScores[p.sessionId] || 50) + trustDelta);
+            }
+          }
+          // Note: We used to penalize players for rejecting teams with no known evil. 
+          // This was removed because blind Good bots were penalizing Merlin for dodging hidden evil.
+        } else {
+          // Evil Bot Logic: Track who is acting like Merlin (rejecting evil teams, approving good teams)
+          if (memory.knownRoles[p.sessionId] !== 'Evil') {
+            if (teamHadKnownEvil && !votedApprove) {
+              // Good player rejected a team with evil -> acts like Merlin
+              memory.merlinSuspicion[p.sessionId] = Math.min(100, (memory.merlinSuspicion[p.sessionId] || 0) + suspicionDelta);
+            } else if (!teamHadKnownEvil && votedApprove) {
+              // Good player approved an all-good team -> acts like Merlin
+              memory.merlinSuspicion[p.sessionId] = Math.min(100, (memory.merlinSuspicion[p.sessionId] || 0) + (suspicionDelta / 2));
+            } else if (teamHadKnownEvil && votedApprove) {
+              // Good player approved team with evil -> less likely Merlin
+              memory.merlinSuspicion[p.sessionId] = Math.max(0, (memory.merlinSuspicion[p.sessionId] || 0) - suspicionDelta);
+            }
+          }
+        }
+
+        // Percival Deduction Update
+        if (bot.role === 'Percival' && memory.percivalCandidates) {
+          const { a, b, merlinLikelihood } = memory.percivalCandidates;
+          if (p.sessionId === a || p.sessionId === b) {
+            // Percival expects Merlin to reject teams with evil
+            if (teamHadKnownEvil && !votedApprove) {
+              merlinLikelihood[p.sessionId] = Math.min(100, merlinLikelihood[p.sessionId] + suspicionDelta);
+              memory.trustScores[p.sessionId] = Math.min(100, (memory.trustScores[p.sessionId] || 50) + trustDelta);
+
+              // The other candidate is less likely Merlin
+              const other = p.sessionId === a ? b : a;
+              merlinLikelihood[other] = Math.max(0, merlinLikelihood[other] - suspicionDelta);
+              memory.trustScores[other] = Math.max(0, (memory.trustScores[other] || 50) - trustDelta);
+            }
+          }
+        }
+
+      });
     });
 
     room.status = 'team_vote_reveal';
@@ -354,6 +460,18 @@ function checkQuestVotes(room: Room, io: Server) {
     quest.status = failed ? 'fail' : 'success';
 
     // Update bot memories based on quest result
+    const difficulty = room.settings.botDifficulty || 'normal';
+
+    // Track fail association for everyone on the team
+    if (failed) {
+      quest.team.forEach(memberId => {
+        room.players.filter(p => p.isBot).forEach(bot => {
+          const memory = room.gameState.botMemories[bot.sessionId];
+          memory.failAssociation[memberId]++;
+        });
+      });
+    }
+
     room.players.filter(p => p.isBot).forEach(bot => {
       const memory = room.gameState.botMemories[bot.sessionId];
       const isBotEvil = ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(bot.role as string);
@@ -369,26 +487,123 @@ function checkQuestVotes(room: Room, io: Server) {
                 memory.trustScores[memberId] = 0;
                 memory.knownRoles[memberId] = 'Evil';
               } else {
-                memory.trustScores[memberId] = Math.max(0, (memory.trustScores[memberId] || 50) - 30);
+                const drop = difficulty === 'hard' ? 40 : 30;
+                memory.trustScores[memberId] = Math.max(0, (memory.trustScores[memberId] || 50) - drop);
               }
             } else {
               // If quest succeeded, trust in team members increases slightly
-              memory.trustScores[memberId] = Math.min(100, (memory.trustScores[memberId] || 50) + 15);
+              const boost = difficulty === 'hard' ? 20 : 15;
+              memory.trustScores[memberId] = Math.min(100, (memory.trustScores[memberId] || 50) + boost);
             }
           }
         });
-      } else {
-        // Evil bots learn who acts like Merlin
-        // If a good player rejected a team that had evil on it, they might be Merlin
+
+        // Good bots ALSO learn from who approved a doomed team vs who rejected it
         const lastVote = room.gameState.voteHistory[room.gameState.voteHistory.length - 1];
         if (lastVote) {
-          const teamHadEvil = lastVote.proposedTeam.some(id => memory.knownRoles[id] === 'Evil');
-          if (teamHadEvil) {
+          room.players.forEach(p => {
+            if (p.sessionId !== bot.sessionId && !quest.team.includes(p.sessionId)) {
+              // Focus on people NOT on the team (we already handled team members above)
+              const votedApprove = lastVote.votes[p.sessionId];
+              if (failed) {
+                // Quest failed. Approvers are suspicious, Rejecters look good (like Merlin).
+                if (votedApprove) {
+                  memory.trustScores[p.sessionId] = Math.max(0, (memory.trustScores[p.sessionId] || 50) - 15);
+                } else {
+                  memory.trustScores[p.sessionId] = Math.min(100, (memory.trustScores[p.sessionId] || 50) + 15);
+                }
+              } else {
+                // Quest succeeded. Approvers look good. 
+                if (votedApprove) {
+                  memory.trustScores[p.sessionId] = Math.min(100, (memory.trustScores[p.sessionId] || 50) + 10);
+                }
+              }
+            }
+          });
+        }
+
+        // Percival deduction on quest ends
+        if (bot.role === 'Percival' && memory.percivalCandidates) {
+          const { a, b, merlinLikelihood } = memory.percivalCandidates;
+
+          const shift = difficulty === 'hard' ? 40 : 20;
+
+          // 1. Evaluate the Proposer of the Quest
+          const leaderId = room.gameState.voteHistory[room.gameState.voteHistory.length - 1]?.leaderIndex;
+          if (leaderId !== undefined) {
+            const proposer = room.players[leaderId].sessionId;
+            if (proposer === a || proposer === b) {
+              const other = proposer === a ? b : a;
+              if (failed) {
+                // A candidate proposed a failing team. They are almost certainly Morgana.
+                merlinLikelihood[proposer] = 0;
+                merlinLikelihood[other] = 100;
+                memory.trustScores[proposer] = 0;
+                memory.trustScores[other] = 100;
+              } else if (difficulty === 'hard') {
+                // A candidate proposed a succeeding team. Slightly more likely to be Merlin.
+                merlinLikelihood[proposer] = Math.min(100, merlinLikelihood[proposer] + 15);
+                merlinLikelihood[other] = Math.max(0, merlinLikelihood[other] - 15);
+              }
+            }
+          }
+
+          // 2. Evaluate Candidate Votes on the Final Team
+          if (lastVote) {
+            const aApproved = lastVote.votes[a];
+            const bApproved = lastVote.votes[b];
+
+            if (aApproved !== bApproved) {
+              const approver = aApproved ? a : b;
+              const rejecter = aApproved ? b : a;
+
+              if (failed) {
+                // Approver of a doomed team is likely Morgana. Rejecter is Merlin.
+                merlinLikelihood[approver] = Math.max(0, merlinLikelihood[approver] - shift);
+                merlinLikelihood[rejecter] = Math.min(100, merlinLikelihood[rejecter] + shift);
+                memory.trustScores[approver] = Math.max(0, (memory.trustScores[approver] || 50) - shift);
+                memory.trustScores[rejecter] = Math.min(100, (memory.trustScores[rejecter] || 50) + shift);
+              } else if (difficulty === 'hard') {
+                // If it succeeded, approver is slightly more likely Merlin
+                merlinLikelihood[approver] = Math.min(100, merlinLikelihood[approver] + 10);
+                merlinLikelihood[rejecter] = Math.max(0, merlinLikelihood[rejecter] - 10);
+              }
+            }
+          }
+
+          // 3. Evaluate Team Participation
+          const aOnTeam = quest.team.includes(a);
+          const bOnTeam = quest.team.includes(b);
+
+          if (aOnTeam !== bOnTeam) {
+            const candidate = aOnTeam ? a : b;
+            const other = aOnTeam ? b : a;
+
+            if (failed) {
+              // Participant on failed team is likely Morgana
+              merlinLikelihood[candidate] = Math.max(0, merlinLikelihood[candidate] - shift);
+              merlinLikelihood[other] = Math.min(100, merlinLikelihood[other] + shift);
+
+              memory.trustScores[candidate] = Math.max(0, (memory.trustScores[candidate] || 50) - shift);
+              memory.trustScores[other] = Math.min(100, (memory.trustScores[other] || 50) + shift);
+            } else if (difficulty === 'hard') {
+              // Participant on succeeding team is somewhat more likely Merlin
+              merlinLikelihood[candidate] = Math.min(100, merlinLikelihood[candidate] + 10);
+              merlinLikelihood[other] = Math.max(0, merlinLikelihood[other] - 10);
+            }
+          }
+        }
+      } else {
+        // Evil bots learn who acts like Merlin
+        // If a good player rejected a team that had evil on it and the quest FAILED, 
+        // they were right, and thus more likely Merlin.
+        if (failed) {
+          const lastVote = room.gameState.voteHistory[room.gameState.voteHistory.length - 1];
+          if (lastVote) {
             room.players.forEach(p => {
               if (memory.knownRoles[p.sessionId] !== 'Evil' && lastVote.votes[p.sessionId] === false) {
-                // This good player rejected a team with evil. They might be Merlin.
-                // Lower their trust score (from evil's perspective, lower trust = more likely Merlin)
-                memory.trustScores[p.sessionId] = Math.max(0, (memory.trustScores[p.sessionId] || 50) - 10);
+                const suspicionBoost = difficulty === 'hard' ? 20 : 10;
+                memory.merlinSuspicion[p.sessionId] = Math.min(100, (memory.merlinSuspicion[p.sessionId] || 0) + suspicionBoost);
               }
             });
           }
@@ -436,26 +651,59 @@ function handleBotActions(room: Room, io: Server) {
         const currentQuest = room.gameState.quests[room.gameState.currentQuestIndex];
         const memory = room.gameState.botMemories[leader.sessionId];
 
-        // Sort players by trust score descending
+        const difficulty = room.settings.botDifficulty || 'normal';
+
+        // Sort players by trust score descending, but also penalize for failAssociation
         const sortedPlayers = [...room.players].sort((a, b) => {
-          return (memory.trustScores[b.sessionId] || 50) - (memory.trustScores[a.sessionId] || 50);
+          const penaltyA = (memory.failAssociation[a.sessionId] || 0) * (difficulty === 'hard' ? 25 : 15);
+          const penaltyB = (memory.failAssociation[b.sessionId] || 0) * (difficulty === 'hard' ? 25 : 15);
+          const trustA = (memory.trustScores[a.sessionId] || 50) - penaltyA;
+          const trustB = (memory.trustScores[b.sessionId] || 50) - penaltyB;
+          return trustB - trustA;
         });
 
         const isEvil = ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(leader.role as string);
         let team: string[] = [];
 
         if (isEvil) {
-          // Evil logic: Include self, maybe one other evil, rest good (to blend in)
-          team.push(leader.sessionId);
-          const otherEvil = sortedPlayers.filter(p => p.sessionId !== leader.sessionId && memory.knownRoles[p.sessionId] === 'Evil');
-          const goodPlayers = sortedPlayers.filter(p => memory.knownRoles[p.sessionId] === 'Good');
+          // --- Improvement B: Strategic Evil Team Building (Hard Mode) ---
+          if (difficulty === 'hard') {
+            const failsNeeded = 3 - room.gameState.quests.filter(q => q.status === 'fail').length;
+            const requiresTwo = currentQuest.requiresTwoFails;
 
-          // Randomly decide if we want to bring another evil (if team size > 2)
-          if (currentQuest.teamSize > 2 && otherEvil.length > 0 && Math.random() > 0.5) {
-            team.push(otherEvil[0].sessionId);
+            if (failsNeeded === 1 && requiresTwo) {
+              // Must get TWO evil players on the team to win
+              team.push(leader.sessionId);
+              const otherEvil = room.players.filter(p => p.sessionId !== leader.sessionId && memory.knownRoles[p.sessionId] === 'Evil');
+              if (otherEvil.length > 0) {
+                team.push(otherEvil[0].sessionId);
+              }
+            } else if (room.gameState.currentQuestIndex === 0 && Math.random() < 0.3) {
+              // Occasional strategic bluff: Propose an all-good team on Quest 1 to build trust
+              const goodPlayers = sortedPlayers.filter(p => memory.knownRoles[p.sessionId] === 'Good');
+              team.push(...goodPlayers.slice(0, currentQuest.teamSize).map(p => p.sessionId));
+            } else {
+              // Standard evil: Include self, maybe one other evil if team size > 2
+              team.push(leader.sessionId);
+              const otherEvil = sortedPlayers.filter(p => p.sessionId !== leader.sessionId && memory.knownRoles[p.sessionId] === 'Evil');
+              if (currentQuest.teamSize > 2 && otherEvil.length > 0 && Math.random() > 0.4) {
+                team.push(otherEvil[0].sessionId);
+              }
+            }
+          } else {
+            // Evil logic (Normal): Include self, maybe one other evil, rest good (to blend in)
+            team.push(leader.sessionId);
+            const otherEvil = sortedPlayers.filter(p => p.sessionId !== leader.sessionId && memory.knownRoles[p.sessionId] === 'Evil');
+
+            // Randomly decide if we want to bring another evil (if team size > 2)
+            if (currentQuest.teamSize > 2 && otherEvil.length > 0 && Math.random() > 0.5) {
+              team.push(otherEvil[0].sessionId);
+            }
           }
 
           // Fill the rest with good players (lowest trust from evil perspective = most good)
+          // Exclude self if already included
+          const goodPlayers = sortedPlayers.filter(p => memory.knownRoles[p.sessionId] === 'Good');
           const remainingSlots = currentQuest.teamSize - team.length;
           const goodToBring = goodPlayers.slice(0, remainingSlots).map(p => p.sessionId);
           team.push(...goodToBring);
@@ -467,7 +715,7 @@ function handleBotActions(room: Room, io: Server) {
           }
 
         } else if (leader.role === 'Merlin') {
-          // Merlin logic: Pick trusted players, but occasionally bait with an evil player on early quests
+          // Merlin logic: Pick trusted players (which for Merlin is just the Good players)
           team = sortedPlayers.slice(0, currentQuest.teamSize).map(p => p.sessionId);
 
           // Always include self
@@ -475,9 +723,11 @@ function handleBotActions(room: Room, io: Server) {
             team[currentQuest.teamSize - 1] = leader.sessionId;
           }
 
-          // Baiting: On quest 1 or 2, 30% chance to include exactly one known evil player to hide identity
-          if (room.gameState.currentQuestIndex < 2 && Math.random() < 0.3) {
-            const knownEvil = room.players.filter(p => memory.knownRoles[p.sessionId] === 'Evil');
+          // Baiting: On early quests, chance to include exactly one known evil player to hide identity
+          // Hard mode does this slightly more effectively, avoiding players with high failAssociation
+          const baitChance = difficulty === 'hard' ? 0.4 : 0.3;
+          if (room.gameState.currentQuestIndex < 2 && Math.random() < baitChance) {
+            const knownEvil = room.players.filter(p => memory.knownRoles[p.sessionId] === 'Evil' && memory.failAssociation[p.sessionId] === 0);
             if (knownEvil.length > 0) {
               // Replace the least trusted good player in the team (excluding self) with a random evil player
               const evilToBait = knownEvil[Math.floor(Math.random() * knownEvil.length)].sessionId;
@@ -513,6 +763,7 @@ function handleBotActions(room: Room, io: Server) {
           const memory = room.gameState.botMemories[bot.sessionId];
           const isEvil = ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(bot.role as string);
           const proposedTeam = room.gameState.proposedTeam;
+          const difficulty = room.settings.botDifficulty || 'normal';
 
           let approve = false;
 
@@ -548,13 +799,34 @@ function handleBotActions(room: Room, io: Server) {
             }
           } else {
             // Good logic (non-Merlin): Approve if average trust is high enough, reject if any known evil
-            const hasKnownEvil = proposedTeam.some(id => memory.knownRoles[id] === 'Evil');
+            let hasKnownEvil = proposedTeam.some(id => memory.knownRoles[id] === 'Evil');
+
+            // --- Improvement: Percival uses their knowledge ---
+            if (bot.role === 'Percival' && memory.percivalCandidates && difficulty === 'hard') {
+              const { a, b, merlinLikelihood } = memory.percivalCandidates;
+              if (merlinLikelihood[a] >= 65 && proposedTeam.includes(b)) hasKnownEvil = true; // b is Morgana
+              if (merlinLikelihood[b] >= 65 && proposedTeam.includes(a)) hasKnownEvil = true; // a is Morgana
+            }
+
             if (hasKnownEvil) {
               approve = false;
             } else {
               const avgTrust = proposedTeam.reduce((sum, id) => sum + (memory.trustScores[id] || 50), 0) / proposedTeam.length;
-              // Higher threshold if not on the team
-              const threshold = proposedTeam.includes(bot.sessionId) ? 45 : 60;
+
+              let threshold = proposedTeam.includes(bot.sessionId) ? 45 : (room.gameState.currentQuestIndex < 2 ? 50 : 55);
+
+              if (difficulty === 'hard') {
+                // Hard Good bots are fiercely skeptical of people who fail quests
+                const hasSuspicious = proposedTeam.some(id => (memory.failAssociation[id] || 0) > 0);
+                if (hasSuspicious) {
+                  threshold += 15; // Strictly reject teams containing failed quest members
+                }
+                // Hard Good bots don't blindly approve Round 1 teams they aren't on giving leader free pass
+                if (!proposedTeam.includes(bot.sessionId) && room.gameState.currentQuestIndex === 0) {
+                  threshold = 52; // Forces average trust to be > 50, requiring they've earned trust.
+                }
+              }
+
               approve = avgTrust >= threshold;
 
               // If it's the last vote track, good players might be forced to approve if trust isn't terrible
@@ -586,24 +858,62 @@ function handleBotActions(room: Room, io: Server) {
 
         // Coordinate evil votes to avoid double fails if possible
         const evilBotsOnTeam = unvotedBots.filter(p => ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(p.role as string));
+        const difficulty = room.settings.botDifficulty || 'normal';
 
         unvotedBots.forEach(bot => {
           const isEvil = ['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(bot.role as string);
           if (isEvil) {
-            // If multiple evil bots, maybe only one fails to hide numbers
-            if (evilBotsOnTeam.length > 1 && !currentQuest.requiresTwoFails) {
-              // Simple coordination: first evil bot in list fails, others succeed
-              if (bot.sessionId === evilBotsOnTeam[0].sessionId) {
+            // --- Improvement E: Strategic Evil Play (Hard mode) ---
+            if (difficulty === 'hard') {
+              const totalFailsSoFar = room.gameState.quests.filter(q => q.status === 'fail').length;
+
+              // If we already have 2 fails, we MUST fail this to win
+              if (totalFailsSoFar === 2) {
                 currentQuest.votes[bot.sessionId] = false;
-              } else {
+              }
+              // If it's quest 1 and team size 2, maybe succeed to build trust
+              else if (room.gameState.currentQuestIndex === 0 && currentQuest.teamSize === 2 && Math.random() < 0.5) {
                 currentQuest.votes[bot.sessionId] = true;
               }
-            } else {
-              // Single evil bot or requires two fails: usually fail, but sometimes succeed on quest 1 to build trust
-              if (room.gameState.currentQuestIndex === 0 && Math.random() > 0.5) {
-                currentQuest.votes[bot.sessionId] = true;
-              } else {
+              // If multiple evil on team and requiresTwoFails, BOTH must fail
+              else if (evilBotsOnTeam.length >= 2 && currentQuest.requiresTwoFails) {
+                // Make sure the first *two* evil bots fail it
+                const evilIndex = evilBotsOnTeam.findIndex(p => p.sessionId === bot.sessionId);
+                if (evilIndex < 2) {
+                  currentQuest.votes[bot.sessionId] = false;
+                } else {
+                  currentQuest.votes[bot.sessionId] = true;
+                }
+              }
+              // If multiple evil but only requires 1 fail, only the first evil bot fails
+              else if (evilBotsOnTeam.length > 1 && !currentQuest.requiresTwoFails) {
+                if (bot.sessionId === evilBotsOnTeam[0].sessionId) {
+                  currentQuest.votes[bot.sessionId] = false;
+                } else {
+                  currentQuest.votes[bot.sessionId] = true;
+                }
+              }
+              // Default fail
+              else {
                 currentQuest.votes[bot.sessionId] = false;
+              }
+            } else {
+              // Normal Mode Play
+              // If multiple evil bots, maybe only one fails to hide numbers
+              if (evilBotsOnTeam.length > 1 && !currentQuest.requiresTwoFails) {
+                // Simple coordination: first evil bot in list fails, others succeed
+                if (bot.sessionId === evilBotsOnTeam[0].sessionId) {
+                  currentQuest.votes[bot.sessionId] = false;
+                } else {
+                  currentQuest.votes[bot.sessionId] = true;
+                }
+              } else {
+                // Single evil bot or requires two fails: usually fail, but sometimes succeed on quest 1 to build trust
+                if (room.gameState.currentQuestIndex === 0 && Math.random() > 0.5) {
+                  currentQuest.votes[bot.sessionId] = true;
+                } else {
+                  currentQuest.votes[bot.sessionId] = false;
+                }
               }
             }
           } else {
@@ -634,18 +944,48 @@ function handleBotActions(room: Room, io: Server) {
         const memory = room.gameState.botMemories[assassin.sessionId];
         const goodPlayers = room.players.filter(p => !['Assassin', 'Morgana', 'Mordred', 'Minion', 'Oberon'].includes(p.role as string));
 
-        // Assassin logic: Find the good player with the lowest trust score (meaning they acted most like Merlin)
-        // Merlin tends to reject teams with evil, lowering their trust from evil's perspective
+        // --- Improvement C: Smarter Assassin ---
+        const difficulty = room.settings.botDifficulty || 'normal';
         let target = goodPlayers[0];
-        let lowestTrust = 100;
 
-        goodPlayers.forEach(p => {
-          const trust = memory.trustScores[p.sessionId] || 50;
-          if (trust < lowestTrust) {
-            lowestTrust = trust;
-            target = p;
-          }
-        });
+        if (difficulty === 'hard') {
+          let highestMerlinScore = -1;
+
+          goodPlayers.forEach(p => {
+            // Base suspicion mapped to 0-40 (max 40)
+            const baseSuspicion = Math.min(40, (memory.merlinSuspicion[p.sessionId] || 0) * 0.4);
+
+            // Vote pattern checks: Merlin rejects teams with evil and approves clean teams
+            const votes = memory.votePatterns[p.sessionId] || { rejectedEvil: 0, approvedEvil: 0, totalVotes: 1 };
+            const voteScore = votes.totalVotes > 0 ? (votes.rejectedEvil / votes.totalVotes) * 30 : 0; // Max 30
+
+            // Fail association: Merlin is rarely on failed quests (Max 15)
+            const failDeduction = (memory.failAssociation[p.sessionId] || 0) * 10;
+            const participationScore = Math.max(0, 15 - failDeduction);
+
+            // Proposal checks: Merlin rarely proposes teams with evil (Max 15)
+            const proposals = room.gameState.voteHistory.filter(h => room.players[h.leaderIndex].sessionId === p.sessionId);
+            const cleanProposals = proposals.filter(h => !h.proposedTeam.some(id => memory.knownRoles[id] === 'Evil')).length;
+            const proposalScore = proposals.length > 0 ? (cleanProposals / proposals.length) * 15 : 0;
+
+            const totalScore = baseSuspicion + voteScore + participationScore + proposalScore;
+
+            if (totalScore > highestMerlinScore) {
+              highestMerlinScore = totalScore;
+              target = p;
+            }
+          });
+        } else {
+          // Normal Assassin logic: Find the good player with the lowest trust score
+          let lowestTrust = 100;
+          goodPlayers.forEach(p => {
+            const trust = memory.trustScores[p.sessionId] || 50;
+            if (trust < lowestTrust) {
+              lowestTrust = trust;
+              target = p;
+            }
+          });
+        }
 
         room.gameState.assassinationTarget = target.sessionId;
         room.gameState.winner = target.role === 'Merlin' ? 'evil' : 'good';
@@ -708,7 +1048,7 @@ function setupSocket(io: Server) {
             id: roomId,
             players: [],
             status: 'lobby',
-            settings: { optionalRoles: [] },
+            settings: { optionalRoles: [], botDifficulty: 'normal' },
             gameState: {
               quests: [],
               currentQuestIndex: 0,
@@ -770,7 +1110,7 @@ function setupSocket(io: Server) {
       }
     });
 
-    socket.on('add_bot', ({ roomId }) => {
+    socket.on('add_bot', ({ roomId, difficulty }) => {
       try {
         const room = rooms[roomId];
         if (room && room.status === 'lobby' && room.players.length < 10) {
@@ -778,11 +1118,16 @@ function setupSocket(io: Server) {
           room.players.push({
             id: botId,
             sessionId: botId,
-            name: 'Bot ' + (room.players.length),
+            name: `Bot ${room.players.length}`,
             role: null,
             isConnected: true,
             isBot: true
           });
+
+          if (difficulty) {
+            room.settings.botDifficulty = difficulty;
+          }
+
           touchRoom(room);
           broadcastRoom(room, io);
         }

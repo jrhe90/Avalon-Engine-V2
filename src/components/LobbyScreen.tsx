@@ -1,6 +1,7 @@
 import { useGameStore, Role } from "../store";
-import { Users, Settings, Play, LogOut, Bot, UserMinus } from "lucide-react";
+import { Users, Settings, Play, LogOut, Bot, UserMinus, Plus, ChevronDown } from "lucide-react";
 import { useTranslation } from "../utils/i18n";
+import { useState } from "react";
 
 export default function LobbyScreen() {
   const room = useGameStore((state) => state.room);
@@ -13,6 +14,7 @@ export default function LobbyScreen() {
   const endGame = useGameStore((state) => state.endGame);
   const devRequestedRole = useGameStore((state) => state.devRequestedRole);
   const { t } = useTranslation();
+  const [showBotMenu, setShowBotMenu] = useState(false);
 
   if (!room) return null;
 
@@ -79,12 +81,33 @@ export default function LobbyScreen() {
                 {t("Players")}
               </h2>
               {canAddBot && (
-                <button
-                  onClick={addBot}
-                  className="text-xs flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors"
-                >
-                  <Bot size={14} /> {t("Add Bot")}
-                </button>
+                <div className="relative">
+                  <button
+                    onClick={() => setShowBotMenu(!showBotMenu)}
+                    className="text-xs flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors bg-indigo-500/10 px-2 py-1 rounded-md border border-indigo-500/20"
+                  >
+                    <Plus size={14} /> {t("Add Bot")} <ChevronDown size={12} className={`transition-transform ${showBotMenu ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {showBotMenu && (
+                    <div className="absolute right-0 top-full mt-1 bg-zinc-900 border border-zinc-700/50 rounded-lg shadow-xl overflow-hidden z-20 min-w-[140px]">
+                      <button
+                        onClick={() => { addBot('normal'); setShowBotMenu(false); }}
+                        className="w-full text-left px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors flex items-center gap-2"
+                      >
+                        <Bot size={14} className="text-zinc-400" />
+                        {t("Normal Bot")}
+                      </button>
+                      <button
+                        onClick={() => { addBot('hard'); setShowBotMenu(false); }}
+                        className="w-full text-left px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors flex items-center gap-2 border-t border-zinc-800"
+                      >
+                        <Bot size={14} className="text-amber-500" />
+                        {t("Hard Bot")}
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
             <ul className="space-y-2">
@@ -95,7 +118,7 @@ export default function LobbyScreen() {
                 >
                   <span className="font-medium flex items-center gap-2">
                     {p.name} {p.sessionId === sessionId && "(You)"}
-                    {p.isBot && <Bot size={14} className="text-zinc-500" />}
+                    {p.isBot && <Bot size={14} className={room.settings.botDifficulty === "hard" ? "text-amber-500" : "text-zinc-500"} />}
                   </span>
                   <div className="flex items-center gap-2">
                     {i === 0 && (

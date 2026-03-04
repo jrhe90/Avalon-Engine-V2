@@ -92,10 +92,10 @@ export default function AuthScreen() {
         <div className="text-center">
           <button
             type="button"
-            className="w-20 h-20 bg-indigo-950/50 border border-indigo-500/50 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-2xl shadow-indigo-500/20"
+            className="w-28 h-28 rounded-3xl overflow-hidden mx-auto mb-6 shadow-[0_0_40px_rgba(99,102,241,0.3)]"
             onClick={() => setDevClickCount(prev => prev + 1)}
           >
-            <Shield size={40} className="text-indigo-400" />
+            <img src="/avalon-logo.png" alt="Avalon Online" className="w-full h-full object-cover" />
           </button>
           <h1 className="text-3xl font-serif font-bold tracking-tight">Avalon Online</h1>
           <p className="text-zinc-400 mt-2 text-sm">A Game of Hidden Loyalty</p>
@@ -225,6 +225,8 @@ export default function AuthScreen() {
             {isLogin ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
           </button>
         </div>
+
+        <p className="text-center text-zinc-600 text-xs mt-6">v{__APP_VERSION__}</p>
       </div>
     </div>
   );
